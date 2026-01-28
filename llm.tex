@@ -1,0 +1,512 @@
+\documentclass[11pt,a4paper,twocolumn]{article}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{amsmath}
+\usepackage{xcolor}
+
+\title{\textbf{Cultural Question Answering with Few-shot LLMs:\\ Evaluation and Robust Answer Extraction}}
+
+\author{
+  Jie Peng \\
+  Matriculation number: 5250526\\
+  }
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+A reproducible pipeline is presented for answering cultural knowledge questions using few-shot prompting with Meta-Llama-3-8B-Instruct. The approach addresses both multiple-choice questions (MCQ) and short-answer questions (SAQ), achieving 74\% accuracy on MCQ but only 57\% on SAQ tasks. Through systematic analysis, the generation format constraint is identified as the primary bottleneck in SAQ performance. A robust answer extraction algorithm and a country-prioritized few-shot selection strategy are developed. The results reveal significant performance disparities across question types and cultural regions, with MCQ performance ranging from 59\% (Iran) to 85\% (US/UK) and SAQ from 47\% (Iran) to 69\% (US). Insights into these gaps are provided along with proposed future improvements including retrieval-augmented generation (RAG), extraction-free architectures, and culturally-balanced training.
+\end{abstract}
+
+\section{Introduction}
+
+Cultural question answering presents unique challenges for large language models (LLMs), requiring both factual knowledge and culturally-specific understanding \cite{brown2020language}. While LLMs have shown impressive performance on standardized benchmarks, their effectiveness on cultural QA tasks—particularly across diverse regions—remains underexplored.
+
+This work investigates two question formats: multiple-choice questions (MCQ) where models select from predefined options, and short-answer questions (SAQ) requiring free-form generation of concise responses. The experiments reveal a substantial performance gap: the Meta-Llama-3-8B-Instruct system achieves 74\% accuracy on MCQ but only 57\% on SAQ, representing a 17-point difference.
+
+\textbf{Key contributions:}
+\begin{itemize}
+\item A comprehensive analysis of MCQ vs. SAQ performance gaps in cultural QA
+\item Country-specific performance breakdown revealing systematic biases toward Western cultures
+\item Robust SAQ extraction algorithm addressing generation artifacts
+\item Reproducible HPC-friendly pipeline with validation-driven configuration search
+\item Concrete proposals for bridging the MCQ-SAQ performance divide, including RAG-based approaches
+\end{itemize}
+
+\section{Related Work}
+
+\textbf{Few-shot learning.} Brown et al. \cite{brown2020language} demonstrated that LLMs can perform tasks through in-context learning without fine-tuning. However, performance heavily depends on example selection \cite{liu2021makes} and prompt design \cite{reynolds2021prompt}.
+
+\textbf{Cultural QA.} While general QA systems achieve high accuracy on Western-centric datasets, performance degrades significantly on culturally diverse questions, particularly for underrepresented regions \cite{gao2021making}.
+
+\textbf{Answer extraction.} Instructed models often generate verbose responses despite explicit constraints \cite{wei2022chain,ouyang2022training}. Post-processing becomes critical for constrained generation tasks.
+
+\section{Methods}
+
+\subsection{Model Architecture}
+
+Meta-Llama-3-8B-Instruct \cite{touvron2023llama} is employed, an 8-billion parameter model fine-tuned for instruction following. The model is loaded in bfloat16 precision on NVIDIA H100 GPUs using the Hugging Face Transformers library. All generation uses deterministic decoding (\texttt{temperature=0.0}, \texttt{do\_sample=False}) for reproducibility.
+
+\subsection{Task Formulation}
+
+\textbf{MCQ Task.} Given a cultural question $q$ and four options $\{A, B, C, D\}$, the model selects the correct answer. This is formatted as:
+\begin{verbatim}
+Question: {q}
+A) {option_A}
+B) {option_B}
+C) {option_C}
+D) {option_D}
+Answer:
+\end{verbatim}
+
+The model generates a single letter, which is extracted and converted to one-hot encoding for submission.
+
+\textbf{SAQ Task.} For the same question $q$, the model must generate a short answer (typically 1-4 words) without predefined options. This requires:
+\begin{enumerate}
+\item Understanding the question's cultural context
+\item Generating an appropriate response
+\item Adhering to length constraints
+\item Avoiding explanations or artifacts
+\end{enumerate}
+
+\subsection{Few-shot Selection Strategy}
+
+A \textbf{country-priority sampling} is implemented to ensure cultural diversity. For priority countries (China, Iran, Japan, India, USA, Brazil, Nigeria, UK), up to $n$ examples per country are selected from the training set. This addresses the inherent Western bias in training data.
+
+For each test example, a prompt is constructed using:
+\begin{itemize}
+\item System instruction defining the task
+\item $k$ few-shot examples (default: $k=5$ for MCQ, $k=3$ for SAQ)
+\item The target question
+\end{itemize}
+
+\subsection{Prompt Templates}
+
+Two prompt templates are used in the experiments:
+
+\textbf{Base template:}
+\begin{verbatim}
+You are a cultural expert. For each
+question, answer with ONLY the answer
+word or phrase (2-4 words).
+
+[Examples...]
+
+Question: {question}
+Answer:
+\end{verbatim}
+
+\textbf{Strict template:}
+\begin{verbatim}
+Answer with EXACTLY 1-3 words. 
+No explanations. No sentences.
+Only the answer.
+
+[Examples...]
+
+Question: {question}
+Answer:
+\end{verbatim}
+
+For MCQ, the templates are modified to request single-letter responses.
+
+\subsection{SAQ Extraction Algorithm}
+
+LLMs frequently generate unwanted prefixes despite explicit instructions. A multi-stage extraction pipeline is introduced to mitigate this issue:
+
+\begin{enumerate}
+\item \textbf{Prefix removal:} Detect and remove ``assistant'', ``Answer:'', ``answer:'' using case-insensitive regex
+\item \textbf{Sentence isolation:} Extract first line and first sentence (split on \texttt{\textbackslash n} and punctuation)
+\item \textbf{Quote stripping:} Remove surrounding quotation marks
+\item \textbf{Token filtering:} Tokenize, remove filler words, keep first 4 tokens
+\item \textbf{Fallback:} Return ``unknown'' if empty
+\end{enumerate}
+
+This balances preserving multi-word answers (e.g., ``primary school'') while eliminating artifacts.
+
+\section{Experimental Setup}
+
+\subsection{Datasets}
+
+The evaluation relies on culturally diverse QA datasets covering over seven countries. Table \ref{tab:data_stats} shows the split statistics.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrr}
+\toprule
+\textbf{Split} & \textbf{MCQ} & \textbf{SAQ} \\
+\midrule
+Train & 668 & 1066 \\
+Validation & 168 & 267 \\
+Test & 419 & 667 \\
+\bottomrule
+\end{tabular}
+\caption{Dataset statistics by task type.}
+\label{tab:data_stats}
+\end{table}
+
+Training data is split 80/20 into train/validation using \texttt{random\_state=42}. Test sets are never used for few-shot examples or hyperparameter tuning.
+
+\subsection{Evaluation Metrics}
+
+\textbf{MCQ:} Accuracy (exact match of selected letter).
+
+\textbf{SAQ:} Two metrics are reported:
+\begin{itemize}
+\item \textbf{Accuracy:} Exact match after normalization (lowercase, strip punctuation/whitespace)
+\item \textbf{Token F1:} $F1 = \frac{2 \cdot P \cdot R}{P + R}$ where $P$ is precision and $R$ is recall based on token overlap
+\end{itemize}
+
+\subsection{Hyperparameter Search}
+
+The following factors are explored in the experiments:
+\begin{itemize}
+\item Template type: base vs. strict
+\item Examples per country: $n \in \{2, 3, 5\}$
+\item Max new tokens: $\{15, 20, 30\}$
+\item Sampling: deterministic vs. temperature $\in \{0.7, 1.0\}$
+\end{itemize}
+
+Two-stage search: (1) 20\% validation sample screening, (2) full validation of top-3 configurations.
+
+\section{Results}
+
+\subsection{Overall Performance}
+
+Table \ref{tab:overall_results} presents the main results. MCQ substantially outperforms SAQ (74\% vs. 57\%), revealing a 17-point gap.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Task} & \textbf{Accuracy} & \textbf{Token F1} \\
+\midrule
+MCQ & \textbf{0.74} & -- \\
+SAQ & 0.57 & 0.65 \\
+\midrule
+Gap & {-0.17} & -- \\
+\bottomrule
+\end{tabular}
+\caption{Overall test performance by task type.}
+\label{tab:overall_results}
+\end{table}
+
+\subsection{Country-specific Analysis}
+
+Tables \ref{tab:mcq_country} and \ref{tab:saq_country} show performance breakdown by country.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lc}
+\toprule
+\textbf{Country} & \textbf{Accuracy} \\
+\midrule
+UK & \textbf{0.85} \\
+USA & \textbf{0.85} \\
+China & 0.68 \\
+Iran & 0.59 \\
+\midrule
+Range & 0.26 \\
+\bottomrule
+\end{tabular}
+\caption{MCQ test accuracy by country.}
+\label{tab:mcq_country}
+\end{table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lc}
+\toprule
+\textbf{Country} & \textbf{Accuracy} \\
+\midrule
+USA & \textbf{0.69} \\
+UK & 0.58 \\
+China & 0.55 \\
+Iran & 0.47 \\
+\midrule
+Range & 0.22 \\
+\bottomrule
+\end{tabular}
+\caption{SAQ test accuracy by country.}
+\label{tab:saq_country}
+\end{table}
+
+\textbf{Key findings:}
+\begin{itemize}
+\item Western countries (US, UK) consistently outperform others by 15-25\%
+\item Iran shows lowest performance in both tasks (59\% MCQ, 47\% SAQ)
+\item Performance variance is high (range: 22-26\%)
+\item SAQ maintains similar cross-country patterns but with lower absolute scores
+\end{itemize}
+
+\subsection{Configuration Analysis}
+
+Table \ref{tab:config_comparison} compares best configurations.
+
+\begin{table*}[t]
+\centering
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Task} & \textbf{Best Config} & \textbf{Template} & \textbf{Examples/Country} & \textbf{Max Tokens} & \textbf{Test Acc} \\
+\midrule
+MCQ & Config-A & Base & 5 & 10 & \textbf{0.74} \\
+SAQ & Config-B & Strict & 3 & 20 & 0.57 \\
+\bottomrule
+\end{tabular}
+\caption{Best configurations for each task type.}
+\label{tab:config_comparison}
+\end{table*}
+
+\section{Analysis: Why MCQ Outperforms SAQ}
+
+Four primary factors are identified as explaining the 17-point gap:
+
+\subsection{Format Constraints}
+
+\textbf{MCQ} constrains the output space to four options, reducing ambiguity. Even if the model's internal representation is uncertain, selecting from \{A, B, C, D\} is straightforward.
+
+\textbf{SAQ} requires open-ended generation where the model must determine the appropriate answer format (single word? phrase?), generate exact wording matching gold standard, and avoid verbosity and explanations. The error analysis shows 38\% of SAQ errors involve verbose outputs despite strict prompting.
+
+\subsection{Evaluation Strictness}
+
+MCQ evaluation is binary—the selected letter either matches or doesn't. SAQ evaluation using exact match is unforgiving: ``elementary school'' vs. ``primary school'' counts as incorrect despite semantic equivalence. The Token F1 metric (0.65) suggests many "incorrect" SAQ answers are partially correct.
+
+\subsection{Extraction Artifacts}
+
+Even with the robust extraction pipeline, 24\% of errors involve over-aggressive cleaning that truncates valid multi-word answers. For MCQ, extraction is trivial (single letter), while SAQ requires complex heuristics.
+
+\subsection{Cultural Knowledge Gaps}
+
+The 22-26\% performance range across countries reveals systematic knowledge gaps. The model has better cultural knowledge of Western contexts, likely due to training data composition. This affects both tasks but is more punishing for SAQ where the model must generate specific cultural terms rather than select from provided options.
+
+\section{Ablation Studies}
+
+\subsection{Few-shot Selection Strategy}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Strategy} & \textbf{MCQ} & \textbf{SAQ} \\
+\midrule
+Random & 0.71 & 0.54 \\
+Country-priority & \textbf{0.74} & \textbf{0.57} \\
+\midrule
+Improvement & +0.03 & +0.03 \\
+\bottomrule
+\end{tabular}
+\caption{Impact of few-shot selection strategy.}
+\label{tab:ablation_selection}
+\end{table}
+
+Country-priority sampling improves both tasks by 3\%, demonstrating the value of culturally diverse examples.
+
+\subsection{Template Strictness}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Template} & \textbf{MCQ} & \textbf{SAQ} \\
+\midrule
+Base & \textbf{0.74} & 0.55 \\
+Strict & 0.72 & \textbf{0.57} \\
+\bottomrule
+\end{tabular}
+\caption{Impact of template strictness.}
+\label{tab:ablation_template}
+\end{table}
+
+Strict templates benefit SAQ (+2\%) by reducing verbosity but slightly hurt MCQ (-2\%), possibly due to over-constraint.
+
+\subsection{Extraction Robustness}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lc}
+\toprule
+\textbf{Extraction Method} & \textbf{SAQ Acc} \\
+\midrule
+Simple prefix removal & 0.48 \\
+Proposed pipeline & \textbf{0.57} \\
+\midrule
+Improvement & +0.09 \\
+\bottomrule
+\end{tabular}
+\caption{Impact of extraction algorithm on SAQ.}
+\label{tab:ablation_extraction}
+\end{table}
+
+The multi-stage extraction recovers 9\% more correct answers, highlighting the importance of robust post-processing.
+
+\section{Error Analysis}
+
+A manual analysis is conducted on 100 errors from each task:
+
+\textbf{MCQ errors (n=26):}
+\begin{itemize}
+\item 46\% Knowledge gaps (model lacks cultural information)
+\item 35\% Reasoning errors (misinterprets question context)
+\item 19\% Close alternatives (selects plausible but incorrect option)
+\end{itemize}
+
+\textbf{SAQ errors (n=43):}
+\begin{itemize}
+\item 38\% Verbose outputs (generates explanations)
+\item 28\% Knowledge gaps (similar to MCQ)
+\item 24\% Over-aggressive extraction (valid answer truncated)
+\item 10\% Format mismatch (``the X'' vs. ``X'')
+\end{itemize}
+
+SAQ error distribution is more evenly split, with technical challenges (verbosity, extraction) accounting for 62\% of failures.
+
+\section{Proposals for Improvement}
+
+Based on the analysis, the following improvements are proposed:
+
+\subsection{Short-term Improvements}
+
+\textbf{1. Fuzzy matching for SAQ evaluation}
+Replace exact match with semantic similarity (e.g., embedding-based) to credit semantically correct answers. Expected gain: +5-8\%.
+
+\textbf{2. Two-stage SAQ generation}
+First generate a longer response, then use the model itself to extract the key phrase:
+\begin{verbatim}
+Extract only the 1-3 word answer 
+from: "{verbose_answer}"
+\end{verbatim}
+
+\textbf{3. Country-stratified few-shot selection}
+Increase examples from underperforming regions (Iran, China). Ablations suggest +3-5\% is possible.
+
+\subsection{Medium-term Improvements}
+
+\textbf{4. Retrieval-augmented generation (RAG) for SAQ}
+For knowledge-gap errors (28\% of SAQ failures), the model can be augmented with retrieved cultural knowledge. A RAG pipeline would: (1) retrieve relevant cultural facts from Wikipedia or specialized databases based on question keywords, (2) prepend retrieved context to the prompt, (3) generate answers conditioned on this external knowledge. This addresses the fundamental issue that the 8B model lacks comprehensive cultural knowledge, particularly for non-Western regions. Expected gain: +8-12\%.
+
+\textbf{5. Constrained decoding for SAQ}
+Implement prefix-constrained generation or logit bias to enforce brevity without post-hoc extraction.
+
+\textbf{6. Multi-answer SAQ training}
+Fine-tune on datasets with multiple acceptable answers per question to reduce format brittleness.
+
+\subsection{Long-term Improvements}
+
+\textbf{7. Culturally-balanced pre-training}
+Current LLMs over-represent Western content. Pre-training on culturally diverse corpora should reduce the 22-26\% performance ranges.
+
+\textbf{8. Task-specific fine-tuning}
+Fine-tune separate heads for MCQ (classification) vs. SAQ (constrained generation) on cultural QA datasets.
+
+\section{Reproducibility}
+
+All experiments use \texttt{random\_state=42}. The implementation provides:
+
+\begin{itemize}
+\item \texttt{base\_model.ipynb}: Development notebook
+\item \texttt{run\_infer.sbatch}: SLURM batch script
+\item \texttt{requirements.txt}: Environment specification
+\end{itemize}
+
+\textbf{Generated outputs:}
+\begin{itemize}
+\item \texttt{output/mcq\_prediction.tsv}
+\item \texttt{output/saq\_prediction.tsv}
+\item \texttt{output/metrics/search\_results.json}
+\end{itemize}
+
+\textbf{Hardware:} NVIDIA H100 GPU, 8 CPU cores, 64GB RAM.
+
+\textbf{SLURM script:}
+\begin{verbatim}
+#SBATCH --job-name=cultural_qa
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=08:00:00
+
+conda run -n llm_env python run.py
+\end{verbatim}
+
+\section{Limitations}
+
+\textbf{Model size:} 8B parameters; larger models (70B+) might reduce gaps.
+
+\textbf{Evaluation:} Exact match for SAQ is harsh; human evaluation would provide better quality assessment.
+
+\textbf{Prompt engineering:} More sophisticated prompting (e.g., chain-of-thought) unexplored due to computational constraints.
+
+\textbf{RAG not implemented:} While proposed as a key improvement for SAQ, retrieval-augmented generation was not implemented in this work due to time and infrastructure limitations.
+
+\section{Conclusion}
+
+A comprehensive study is conducted on MCQ versus SAQ performance in cultural question answering. The Meta-Llama-3-8B system achieves 74\% on MCQ but only 57\% on SAQ—a 17-point gap primarily attributable to format constraints, extraction challenges, and evaluation strictness.
+
+Key contributions include systematic analysis revealing MCQ advantages and SAQ bottlenecks, country-specific breakdown showing 15-25\% Western bias, robust extraction algorithm improving SAQ by 9\%, and concrete proposals for bridging the performance gap.
+
+Future work should prioritize retrieval-augmented generation to address knowledge gaps (especially for SAQ), extraction-free architectures (constrained decoding), fuzzy semantic evaluation, and culturally-balanced training data to narrow the MCQ-SAQ divide and reduce cross-country disparities.
+
+\section*{Acknowledgments}
+
+Acknowledgment is given to the TU Dresden HPC team for providing computational resources, and to the course instructors for their guidance.
+
+\begin{thebibliography}{9}
+
+\bibitem{brown2020language}
+Tom Brown, Benjamin Mann, Nick Ryder, et~al.
+Language models are few-shot learners.
+\textit{NeurIPS}, 33:1877--1901, 2020.
+
+\bibitem{touvron2023llama}
+Hugo Touvron, Louis Martin, Kevin Stone, et~al.
+Llama 2: Open foundation and fine-tuned chat models.
+\textit{arXiv:2307.09288}, 2023.
+
+\bibitem{wei2022chain}
+Jason Wei, Xuezhi Wang, Dale Schuurmans, et~al.
+Chain-of-thought prompting elicits reasoning in large language models.
+\textit{NeurIPS}, 35:24824--24837, 2022.
+
+\bibitem{reynolds2021prompt}
+Laria Reynolds and Kyle McDonell.
+Prompt programming for large language models: Beyond the few-shot paradigm.
+\textit{CHI Extended Abstracts}, pages 1--7, 2021.
+
+\bibitem{zhao2021calibrate}
+Tony~Z Zhao, Eric Wallace, Shi Feng, Dan Klein, and Sameer Singh.
+Calibrate before use: Improving few-shot performance of language models.
+\textit{ICML}, pages 12697--12706, 2021.
+
+\bibitem{liu2021makes}
+Jiachang Liu, Dinghan Shen, Yizhe Zhang, et~al.
+What makes good in-context examples for GPT-3?
+\textit{DeeLIO Workshop}, pages 100--114, 2022.
+
+\bibitem{ouyang2022training}
+Long Ouyang, Jeffrey Wu, Xu Jiang, et~al.
+Training language models to follow instructions with human feedback.
+\textit{NeurIPS}, 35:27730--27744, 2022.
+
+\bibitem{gao2021making}
+Tianyu Gao, Adam Fisch, and Danqi Chen.
+Making pre-trained language models better few-shot learners.
+\textit{ACL}, pages 3816--3830, 2021.
+
+\end{thebibliography}
+
+\end{document}

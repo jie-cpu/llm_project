@@ -34,4 +34,4 @@ This project contains notebooks and datasets for experiments with Multiple Choic
 
 Issues and pull requests are welcome. If you'd like me to add a License, dependency list, or running examples, please let me know.
 
-**Author**: Your Name (editable)
+**Author**: Jie Peng
